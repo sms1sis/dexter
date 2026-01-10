@@ -64,8 +64,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if let Some(info_list) = info_opt {
             for (i, info) in info_list.iter().enumerate() {
                 let colored_raw = colorize_line(&info.raw_line, &info.status);
-                if i == 0 { writeln!(stdout, "{} | {}", format!("{:<45}", pkg).bright_white(), colored_raw)?; } 
-                else { writeln!(stdout, "{:<45} | {}", "", colored_raw)?; }
+                if i == 0 { writeln!(stdout, "{} | {}", format!("{:<45}", pkg).bright_white(), colored_raw)?;
+ } 
+                else { writeln!(stdout, "{:<45} | {}", "", colored_raw)?;
+ }
             }
             writeln!(stdout)?;
         }
@@ -75,12 +77,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_block_entry(stdout: &mut io::Stdout, pkg: &str, info_opt: Option<&Vec<DexOptInfo>>) -> io::Result<()> {
-    let width = 60;
+    let padding = 2;
+    let min_width = 40;
+    let content_len = pkg.len() + (padding * 2);
+    let width = if content_len > min_width { content_len } else { min_width };
+    
     let border = "─".repeat(width);
     writeln!(stdout, "{}", format!("┌{}┐", border).cyan())?;
     
-    let pkg_display = if pkg.len() > width - 2 { &pkg[..width-2] } else { pkg };
-    writeln!(stdout, "{} {:<w$} {}", "│".cyan(), pkg_display.bold().bright_white(), "│".cyan(), w = width - 1)?;
+    let p_space = width - pkg.len();
+    let p_l = p_space / 2;
+    let p_r = p_space - p_l;
+    
+    writeln!(stdout, "{}{}{}{}", "│".cyan(), " ".repeat(p_l), pkg.bold().bright_white(), format!("{}{}", " ".repeat(p_r), "│").cyan())?;
     
     writeln!(stdout, "{}", format!("└{}┘", border).cyan())?;
     
@@ -102,6 +111,7 @@ fn colorize_line(line: &str, status: &str) -> String {
         "verify" => line.yellow().to_string(),
         "quicken" => line.blue().to_string(),
         "run-from-apk" => line.red().to_string(),
+        "error" => line.red().bold().to_string(),
         "everything" => line.magenta().to_string(),
         _ => line.white().to_string(),
     }
@@ -176,7 +186,7 @@ fn print_summary(total_apps: usize, stats: &BTreeMap<String, usize>, app_type: A
         for (profile, count) in stats {
             let color = match profile.as_str() {
                 "speed-profile" => Color::Green, "speed" => Color::BrightGreen, "verify" => Color::Yellow,
-                "quicken" => Color::Blue, "run-from-apk" => Color::Red, "everything" => Color::Magenta, _ => Color::White,
+                "quicken" => Color::Blue, "run-from-apk" => Color::Red, "error" => Color::Red, "everything" => Color::Magenta, _ => Color::White,
             };
             add_summary_line(profile, &count.to_string(), Color::Cyan, color, width);
         }
