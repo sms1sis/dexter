@@ -131,7 +131,7 @@ fn parse_dump(dump: &str) -> HashMap<String, Vec<DexOptInfo>> {
     let mut results: HashMap<String, Vec<DexOptInfo>> = HashMap::new();
     let mut current_pkg: Option<String> = None;
     let status_re = Regex::new(r"(arm64:|arm:)").unwrap();
-    let filter_extract_re = Regex::new(r"\^\[(?:status|filter)=([^\]]+)\^\]").unwrap();
+    let filter_extract_re = Regex::new(r"\[(?:status|filter)=([^\]]+)\]").unwrap();
     for line in dump.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
