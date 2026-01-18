@@ -14,6 +14,7 @@ An advanced, high-performance Android DexOpt status analyzer written in Rust. Th
 
 - **Termux** or a Linux environment on Android.
 - **Root access** (`su` or `tsu`) is required to run `dumpsys package dexopt`.
+- **aapt** (Android Asset Packaging Tool) is recommended for fetching application labels in verbose mode.
 - **Rust/Cargo** (for building from source).
 
 ## Installation
