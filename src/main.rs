@@ -126,49 +126,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn get_package_status_color(info_opt: Option<&Vec<DexOptInfo>>) -> Color {
-    if let Some(info_list) = info_opt {
-        // Priority: Error > Run-from-apk > Verify > Quicken > Speed > Everything > Other
-        let mut has_speed = false;
-        let mut has_quicken = false;
-        let mut has_verify = false;
-        let mut has_run_from_apk = false;
-        let mut has_error = false;
-
-        for info in info_list {
-            match info.status.as_str() {
-                "error" => has_error = true,
-                "run-from-apk" => has_run_from_apk = true,
-                "verify" => has_verify = true,
-                "quicken" => has_quicken = true,
-                "speed" | "speed-profile" => has_speed = true,
-                _ => {}
-            }
-        }
-
-        if has_error {
-            return Color::Red;
-        }
-        if has_run_from_apk {
-            return Color::Red;
-        }
-        if has_verify {
-            return Color::Yellow;
-        }
-        if has_quicken {
-            return Color::Blue;
-        }
-        if has_speed {
-            return Color::Green;
-        }
-        // Fallback or "everything" or unknown
-        Color::White
-    } else {
-        // No info found -> Red usually indicates an issue reading state or unoptimized
-        Color::Red
-    }
-}
-
 fn print_block_entry(
     stdout: &mut io::Stdout,
     pkg: &Package,
@@ -199,11 +156,11 @@ fn print_block_entry(
     let p_r = p_space - p_l;
 
     // Construct the inner colored string manually to allow different colors for label vs package
-    let status_color = get_package_status_color(info_opt);
+    // App Name is highlighted in Yellow to stand out, distinct from status colors.
     let inner_content = if let Some(ref label) = app_label {
          format!(
             "{} ({})",
-            label.bold().color(status_color), 
+            label.bold().yellow(), 
             pkg.name.bold().bright_white()
         )
     } else {
