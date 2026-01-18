@@ -1,3 +1,4 @@
+use apk_info::Apk;
 use clap::{Parser, ValueEnum};
 use colored::*;
 use rayon::prelude::*;
@@ -129,18 +130,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     print_summary(total_displayed, &stats, args.r#type);
 
-    if args.verbose && !check_aapt_installed() {
-        println!();
-        eprintln!(
-            "{}",
-            "Warning: 'aapt' is not installed. Application labels were not displayed.".yellow().bold()
-        );
-        eprintln!(
-            "{}",
-            "Install it via 'pkg install aapt' for a better experience.".yellow().bold()
-        );
-    }
-
     Ok(())
 }
 
@@ -224,54 +213,12 @@ fn print_block_entry(
 }
 
 fn get_app_label(path: &str, _pkg_name: &str) -> Option<String> {
-    // Primary method: aapt dump badging
-    let output = Command::new("aapt")
-        .arg("dump")
-        .arg("badging")
-        .arg(path)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // First pass: try standard application-label
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if let Some(label) = trimmed.strip_prefix("application-label:'") {
-            if let Some(end) = label.find('\'') {
-                return Some(label[..end].to_string());
-            }
+    match Apk::new(path) {
+        Ok(apk) => {
+             apk.get_application_label()
         }
+        Err(_) => None,
     }
-
-    // Second pass: try other variations if not found
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        // Check for "application: label='...'"
-        if trimmed.starts_with("application:") {
-            if let Some(idx) = trimmed.find("label='") {
-                let rest = &trimmed[idx + 7..];
-                if let Some(end) = rest.find('\'') {
-                    return Some(rest[..end].to_string());
-                }
-            }
-        }
-        // Check for launchable-activity label as fallback
-        if trimmed.starts_with("launchable-activity:") {
-            if let Some(idx) = trimmed.find("label='") {
-                let rest = &trimmed[idx + 7..];
-                if let Some(end) = rest.find('\'') {
-                    return Some(rest[..end].to_string());
-                }
-            }
-        }
-    }
-
-    None
 }
 
 fn get_status_color(status: &str) -> Color {
@@ -467,18 +414,7 @@ fn add_summary_line(label: &str, value: &str, l_col: Color, v_col: Color, width:
 
 
 
-fn check_aapt_installed() -> bool {
 
-    Command::new("which")
 
-        .arg("aapt")
-
-        .output()
-
-        .map(|output| output.status.success())
-
-        .unwrap_or(false)
-
-}
 
 
