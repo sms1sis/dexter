@@ -1,13 +1,14 @@
 use apk_info::Apk;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use colored::*;
-use rayon::prelude::*;
-use regex::Regex;
+use colored::*;use rayon::prelude::*;use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{self, Write};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use serde::Serialize;
+use serde_json::json;
+use once_cell::sync::Lazy;
 
 /// A tool to analyze dexopt status on Android devices.
 #[derive(Parser, Debug)]
@@ -17,6 +18,10 @@ struct Args {
     #[arg(short, long)]
     filter: Option<String>,
 
+    /// Filter by specific dexopt status (e.g., 'speed', 'verify', 'error')
+    #[arg(short, long)]
+    status: Option<String>,
+
     /// Type of applications to analyze
     #[arg(short, long, value_enum, default_value_t = AppType::User)]
     r#type: AppType,
@@ -24,6 +29,10 @@ struct Args {
     /// Show detailed information for each package
     #[arg(short, long)]
     verbose: bool,
+
+    /// Output results as JSON
+    #[arg(short, long)]
+    json: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -44,7 +53,7 @@ impl fmt::Display for AppType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct Package {
     name: String,
     path: String,
@@ -59,12 +68,15 @@ impl Package {
             AppType::All => "",
         };
 
-        let cmd = format!("pm list packages -f {}", filter_flag);
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .output()
-            .with_context(|| format!("Failed to execute command: {}", cmd))?;
+        // Performance: Execute `pm` directly instead of `sh -c`
+        let mut cmd = Command::new("pm");
+        cmd.arg("list").arg("packages").arg("-f");
+        if !filter_flag.is_empty() {
+            cmd.arg(filter_flag);
+        }
+
+        let output = cmd.output()
+            .with_context(|| "Failed to execute 'pm' command")?;
 
         let raw = String::from_utf8_lossy(&output.stdout);
         let mut list = Vec::new();
@@ -92,9 +104,7 @@ impl Package {
                 let clean = label.trim().replace(['\r', '\n'], " ");
                 if !clean.is_empty() {
                     // Heuristic: Filter out internal class names
-                    // If it looks like a java package/class (dots, no spaces) and isn't the package name itself
                     let is_class_name = clean.contains('.') && !clean.contains(' ') && clean != self.name;
-                    // Additional check: valid class chars
                     let looks_like_class = clean.chars().all(|c: char| c.is_alphanumeric() || c == '.' || c == '_');
                     
                     if !is_class_name || !looks_like_class {
@@ -105,7 +115,6 @@ impl Package {
         }
 
         // 2. Fallback to aapt (Slow but Universal)
-        // Only runs if native failed or returned a suspicious label
         self.get_label_from_aapt()
     }
 
@@ -125,7 +134,7 @@ impl Package {
         for line in stdout.lines() {
             let trimmed = line.trim();
             if let Some(label) = trimmed.strip_prefix("application-label:'") {
-                if let Some(end) = label.find('\'') {
+                if let Some(end) = label.find('‘') {
                     return Some(label[..end].to_string());
                 }
             }
@@ -136,13 +145,15 @@ impl Package {
     fn is_aapt_available() -> bool {
         Command::new("which")
             .arg("aapt")
-            .output()
-            .map(|output| output.status.success())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
             .unwrap_or(false)
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct DexOptInfo {
     raw_line: String,
     status: String,
@@ -152,17 +163,16 @@ struct Analyzer {
     results: HashMap<String, Vec<DexOptInfo>>,
 }
 
-use once_cell::sync::Lazy;
-
 static STATUS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(arm64:|arm:)").expect("Invalid regex for status"));
 static FILTER_EXTRACT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(?:status|filter)=([^]\s]+)").expect("Invalid regex for filter extraction"));
 
 impl Analyzer {
     /// Fetches the dexopt dump from `dumpsys package dexopt`.
     fn fetch_dump() -> Result<String> {
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg("dumpsys package dexopt")
+        // Performance: Execute `dumpsys` directly
+        let output = Command::new("dumpsys")
+            .arg("package")
+            .arg("dexopt")
             .output()?;
 
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -271,8 +281,8 @@ impl UI {
         };
 
         writeln!(
-            stdout,
-            "{}{}{}{}",
+            stdout, 
+            "{}{} {} {}",
             "│".cyan(),
             " ".repeat(p_l),
             inner_content,
@@ -369,32 +379,50 @@ impl UI {
     }
 }
 
+fn check_root() -> Result<()> {
+    if !nix::unistd::Uid::current().is_root() {
+        eprintln!("{}", "Error: This tool requires root access (su).".red().bold());
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
+    check_root()?;
     let args = Args::parse();
+
     let prefix = "[-]".cyan();
 
-    println!("{} {} ({}) ...", prefix, "Fetching package list".bold(), args.r#type);
+    if !args.json {
+        let msg = "Fetching package list".bold();
+        println!("{} {} ({}) ...", prefix, msg, args.r#type);
+    }
     let packages = Package::fetch_list(args.r#type)?;
     
-    println!("{} Found {} packages.", prefix, packages.len().to_string().green().bold());
-    println!("{} {}", prefix, "Fetching dexopt dump...".bold());
+    if !args.json {
+        println!("{} Found {} packages.", prefix, packages.len().to_string().green().bold());
+        let msg = "Fetching dexopt dump...".bold();
+        println!("{} {}", prefix, msg);
+    }
     let dump = Analyzer::fetch_dump()?;
     let analyzer = Analyzer::new(&dump);
 
-    if !args.verbose {
+    if !args.json && !args.verbose {
         UI::print_header();
     }
 
     let mut stdout = io::stdout();
     let mut stats: BTreeMap<String, usize> = BTreeMap::new();
     let mut total_displayed = 0;
+    let mut json_results = Vec::new();
 
+    // Filtering Logic
     let filtered_packages: Vec<&Package> = packages
         .iter()
         .filter(|pkg| args.filter.as_ref().map_or(true, |f| pkg.name.contains(f)))
         .collect();
 
-    let display_data: Vec<(&Package, Option<String>)> = if args.verbose {
+    let display_data: Vec<(&Package, Option<String>)> = if args.verbose || args.json {
         filtered_packages
             .par_iter()
             .map(|pkg| (*pkg, pkg.get_label()))
@@ -407,40 +435,85 @@ fn main() -> Result<()> {
         let info_list = analyzer.get_info(&pkg.name);
 
         if let Some(infos) = info_list {
+            // Apply Status Filter
+            if let Some(ref status_filter) = args.status {
+                if !infos.iter().any(|i| i.status.contains(status_filter)) {
+                    continue;
+                }
+            }
+
             total_displayed += 1;
             for info in infos {
                 *stats.entry(info.status.clone()).or_insert(0) += 1;
             }
+        } else if args.status.is_some() {
+            // If status filter is active but app has no info, skip it
+            continue;
         }
 
-        if args.verbose {
-            UI::print_block_entry(&mut stdout, pkg, app_label.as_deref(), info_list)?;
-        } else if let Some(infos) = info_list {
-            for (i, info) in infos.iter().enumerate() {
-                let colored_raw = UI::colorize_line(&info.raw_line, &info.status);
-                if i == 0 {
-                    writeln!(stdout, "{} | {}", format!("{:<45}", pkg.name).bright_white(), colored_raw)?;
-                } else {
-                    writeln!(stdout, "{:<45} | {}", "", colored_raw)?;
+        if args.json {
+            json_results.push(json!({
+                "package": pkg.name,
+                "label": app_label,
+                "path": pkg.path,
+                "dexopt_info": info_list
+            }));
+        } else {
+            if args.verbose {
+                UI::print_block_entry(&mut stdout, pkg, app_label.as_deref(), info_list)?;
+            } else if let Some(infos) = info_list {
+                for (i, info) in infos.iter().enumerate() {
+                    let colored_raw = UI::colorize_line(&info.raw_line, &info.status);
+                    if i == 0 {
+                        writeln!(stdout, "{} | {}", format!("{:<45}", pkg.name).bright_white(), colored_raw)?;
+                    } else {
+                        writeln!(stdout, "{:<45} | {}", "", colored_raw)?;
+                    }
                 }
+                writeln!(stdout)?;
             }
-            writeln!(stdout)?;
         }
     }
 
-    UI::print_summary(total_displayed, &stats, args.r#type);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&json_results)?);
+    } else {
+        UI::print_summary(total_displayed, &stats, args.r#type);
 
-    if args.verbose && !Package::is_aapt_available() {
-        println!();
-        eprintln!(
-            "{}",
-            "Warning: 'aapt' is not installed. Some application labels might be missing.".yellow().bold()
-        );
-        eprintln!(
-            "{}",
-            "Install it via 'pkg install aapt' for the best experience.".yellow().bold()
-        );
+        if args.verbose && !Package::is_aapt_available() {
+            println!();
+            let msg1 = "Warning: 'aapt' is not installed. Some application labels might be missing.".yellow().bold();
+            let msg2 = "Install it via 'pkg install aapt' for the best experience.".yellow().bold();
+            eprintln!("{}", msg1);
+            eprintln!("{}", msg2);
+        }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_analyzer_parsing() {
+        let sample_dump = r#"
+[com.example.app]
+  arm64: [status=speed-profile] [reason=bg-dexopt] [primary-abi]
+[com.system.service]
+  arm64: [status=verify] [reason=prebuilt]
+"#;
+        let analyzer = Analyzer::new(sample_dump);
+        
+        let info_app = analyzer.get_info("com.example.app").unwrap();
+        assert_eq!(info_app.len(), 1);
+        assert_eq!(info_app[0].status, "speed-profile");
+
+        let info_sys = analyzer.get_info("com.system.service").unwrap();
+        assert_eq!(info_sys.len(), 1);
+        assert_eq!(info_sys[0].status, "verify");
+        
+        assert!(analyzer.get_info("non.existent").is_none());
+    }
 }
