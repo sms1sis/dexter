@@ -37,14 +37,6 @@ impl fmt::Display for AppType {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-
-    if args.verbose && !check_aapt_installed() {
-        eprintln!(
-            "{}",
-            "Warning: 'aapt' is not installed. Application labels will not be displayed. Install it via 'pkg install aapt'.".yellow().bold()
-        );
-    }
-
     let prefix = "[-]".cyan();
     println!(
         "{} {} ({}) ...",
@@ -131,6 +123,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     print_summary(total_displayed, &stats, args.r#type);
+
+    if args.verbose && !check_aapt_installed() {
+        println!();
+        eprintln!(
+            "{}",
+            "Warning: 'aapt' is not installed. Application labels were not displayed.".yellow().bold()
+        );
+        eprintln!(
+            "{}",
+            "Install it via 'pkg install aapt' for a better experience.".yellow().bold()
+        );
+    }
+
     Ok(())
 }
 
