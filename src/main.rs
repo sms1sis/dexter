@@ -9,6 +9,8 @@ use std::process::{Command, Stdio};
 use serde::Serialize;
 use serde_json::json;
 use once_cell::sync::Lazy;
+use unicode_width::UnicodeWidthStr;
+use terminal_size::{Width, terminal_size};
 
 /// A tool to analyze dexopt status on Android devices.
 #[derive(Parser, Debug)]
@@ -250,69 +252,233 @@ impl UI {
         );
     }
 
-    fn print_block_entry(
-        stdout: &mut io::Stdout,
-        pkg: &Package,
-        app_label: Option<&str>,
-        info_list: Option<&Vec<DexOptInfo>>,
-    ) -> io::Result<()> {
-        let min_width = 40;
-        let display_name = match app_label {
-            Some(label) => format!("{} ({})", label, pkg.name),
-            None => pkg.name.clone(),
-        };
+        fn print_block_entry(
 
-        let width = (display_name.len() + 4).max(min_width);
-        let border = "─".repeat(width);
+            stdout: &mut io::Stdout,
 
-        writeln!(stdout, "{}", format!("┌{}┐", border).cyan())?;
+            pkg: &Package,
 
-        let p_space = width - display_name.len();
-        let p_l = p_space / 2;
-        let p_r = p_space - p_l;
+            app_label: Option<&str>,
 
-        let inner_content = match app_label {
-            Some(label) => format!(
-                "{} ({})",
-                label.bold().cyan(), 
-                pkg.name.bold().bright_white()
-            ),
-            None => pkg.name.bold().bright_white().to_string(),
-        };
+            info_list: Option<&Vec<DexOptInfo>>,
 
-        writeln!(
-            stdout, 
-            "{}{} {} {}",
-            "│".cyan(),
-            " ".repeat(p_l),
-            inner_content,
-            format!("{}{}", " ".repeat(p_r), "│").cyan()
-        )?;
+        ) -> io::Result<()> {
 
-        writeln!(stdout, "{}", format!("└{}┘", border).cyan())?;
+            let min_width = 40;
 
-        if let Some(infos) = info_list {
-            let max_prefix_len = infos
-                .iter()
-                .filter_map(|i| i.raw_line.find(':'))
-                .max()
-                .unwrap_or(0);
+            
 
-            for info in infos {
-                let formatted = if let Some(idx) = info.raw_line.find(':') {
-                    let (prefix, rest) = info.raw_line.split_at(idx);
-                    format!("{:width$}{}", prefix, rest, width = max_prefix_len)
-                } else {
-                    info.raw_line.clone()
-                };
-                writeln!(stdout, "  {}", Self::colorize_line(&formatted, &info.status))?;
+            // Calculate max available width from terminal size
+
+            let max_term_width = if let Some((Width(w), _)) = terminal_size() {
+
+                (w as usize).saturating_sub(4) // Leave some margin
+
+            } else {
+
+                120 // Default fallback
+
+            };
+
+    
+
+            // Construct display name
+
+            let full_display_name = match app_label {
+
+                Some(label) => format!("{} ({})", label, pkg.name),
+
+                None => pkg.name.clone(),
+
+            };
+
+    
+
+            // Truncate if too long for terminal
+
+            let display_name = if full_display_name.width() > max_term_width {
+
+                // Simple truncation (could be improved with unicode-aware truncation)
+
+                let mut truncated = String::new();
+
+                let mut width = 0;
+
+                for c in full_display_name.chars() {
+
+                    let c_width = UnicodeWidthStr::width(c.to_string().as_str());
+
+                    if width + c_width > max_term_width - 3 {
+
+                        truncated.push_str("...");
+
+                        break;
+
+                    }
+
+                    truncated.push(c);
+
+                    width += c_width;
+
+                }
+
+                truncated
+
+            } else {
+
+                full_display_name
+
+            };
+
+    
+
+            let content_width = display_name.width();
+
+            let box_width = (content_width + 4).max(min_width);
+
+            
+
+            // Ensure box doesn't exceed terminal even after min_width logic
+
+            let box_width = box_width.min(max_term_width + 4); 
+
+            
+
+            let border = "─".repeat(box_width);
+
+    
+
+            writeln!(stdout, "{}", format!("┌{}┐", border).cyan())?;
+
+    
+
+            let p_space = box_width.saturating_sub(content_width);
+
+            let p_l = p_space / 2;
+
+            let p_r = p_space - p_l;
+
+    
+
+            // Reconstruct inner content with colors, using the (potentially truncated) display_name parts
+
+            // Note: If we truncated, we can't easily colorize parts separately without complex logic.
+
+            // For simplicity/robustness, if truncated, we colorize the whole string.
+
+            // If not truncated, we use the fancy split coloring.
+
+            
+
+            let inner_content = if display_name.ends_with("...") {
+
+                 display_name.bold().bright_white().to_string()
+
+            } else {
+
+                 match app_label {
+
+                    Some(label) => format!(
+
+                        "{} ({})",
+
+                        label.bold().cyan(), 
+
+                        pkg.name.bold().bright_white()
+
+                    ),
+
+                    None => pkg.name.bold().bright_white().to_string(),
+
+                }
+
+            };
+
+    
+
+            writeln!(
+
+                stdout,
+
+                "{}{}{}{}",
+
+                "│".cyan(),
+
+                " ".repeat(p_l),
+
+                inner_content,
+
+                format!("{}{}", " ".repeat(p_r), "│").cyan()
+
+            )?;
+
+    
+
+            writeln!(stdout, "{}", format!("└{}┘", border).cyan())?;
+
+    
+
+            if let Some(infos) = info_list {
+
+                let max_prefix_len = infos
+
+                    .iter()
+
+                    .filter_map(|i| i.raw_line.find(':'))
+
+                    .max()
+
+                    .unwrap_or(0);
+
+    
+
+                for info in infos {
+
+                    // Truncate dexopt info lines too if they are super long
+
+                    let raw_line = if info.raw_line.width() > max_term_width {
+
+                         let mut s = info.raw_line.chars().take(max_term_width - 3).collect::<String>();
+
+                         s.push_str("...");
+
+                         s
+
+                    } else {
+
+                        info.raw_line.clone()
+
+                    };
+
+    
+
+                    let formatted = if let Some(idx) = raw_line.find(':') {
+
+                        let (prefix, rest) = raw_line.split_at(idx);
+
+                        format!("{:width$}{}", prefix, rest, width = max_prefix_len)
+
+                    } else {
+
+                        raw_line
+
+                    };
+
+                    writeln!(stdout, "  {}", Self::colorize_line(&formatted, &info.status))?;
+
+                }
+
+            } else {
+
+                writeln!(stdout, "  {}", "(no info found)".italic().red())?;
+
             }
-        } else {
-            writeln!(stdout, "  {}", "(no info found)".italic().red())?;
+
+            writeln!(stdout)?;
+
+            Ok(())
+
         }
-        writeln!(stdout)?;
-        Ok(())
-    }
 
     fn print_summary(total_apps: usize, stats: &BTreeMap<String, usize>, app_type: AppType) {
         let width = 47;
