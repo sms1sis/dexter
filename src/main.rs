@@ -237,11 +237,36 @@ fn get_app_label(path: &str, _pkg_name: &str) -> Option<String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // First pass: try standard application-label
     for line in stdout.lines() {
         let trimmed = line.trim();
         if let Some(label) = trimmed.strip_prefix("application-label:'") {
             if let Some(end) = label.find('\'') {
                 return Some(label[..end].to_string());
+            }
+        }
+    }
+
+    // Second pass: try other variations if not found
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        // Check for "application: label='...'"
+        if trimmed.starts_with("application:") {
+            if let Some(idx) = trimmed.find("label='") {
+                let rest = &trimmed[idx + 7..];
+                if let Some(end) = rest.find('\'') {
+                    return Some(rest[..end].to_string());
+                }
+            }
+        }
+        // Check for launchable-activity label as fallback
+        if trimmed.starts_with("launchable-activity:") {
+            if let Some(idx) = trimmed.find("label='") {
+                let rest = &trimmed[idx + 7..];
+                if let Some(end) = rest.find('\'') {
+                    return Some(rest[..end].to_string());
+                }
             }
         }
     }
