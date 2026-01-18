@@ -66,12 +66,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for pkg in &packages {
         if let Some(ref f) = args.filter {
-            if !pkg.contains(f) {
+            if !pkg.name.contains(f) {
                 continue;
             }
         }
 
-        let info_opt = results.get(pkg);
+        let info_opt = results.get(&pkg.name);
 
         if let Some(info_list) = info_opt {
             total_displayed += 1;
@@ -81,7 +81,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if args.verbose {
-            print_block_entry(&mut stdout, pkg, info_opt)?;
+            let app_label = get_app_label(&pkg.path);
+            print_block_entry(&mut stdout, pkg, app_label, info_opt)?;
         } else if let Some(info_list) = info_opt {
             for (i, info) in info_list.iter().enumerate() {
                 let colored_raw = colorize_line(&info.raw_line, &info.status);
@@ -89,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     writeln!(
                         stdout,
                         "{} | {}",
-                        format!("{:<45}", pkg).bright_white(),
+                        format!("{:<45}", pkg.name).bright_white(),
                         colored_raw
                     )?;
                 } else {
@@ -105,12 +106,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_block_entry(
     stdout: &mut io::Stdout,
-    pkg: &str,
+    pkg: &Package,
+    app_label: Option<String>,
     info_opt: Option<&Vec<DexOptInfo>>,
 ) -> io::Result<()> {
     let padding = 2;
     let min_width = 40;
-    let content_len = pkg.len() + (padding * 2);
+    
+    let display_name = if let Some(label) = app_label {
+        format!("{} ({})", label, pkg.name)
+    } else {
+        pkg.name.clone()
+    };
+
+    let content_len = display_name.len() + (padding * 2);
     let width = if content_len > min_width {
         content_len
     } else {
@@ -120,7 +129,7 @@ fn print_block_entry(
     let border = "─".repeat(width);
     writeln!(stdout, "{}", format!("┌{}┐", border).cyan())?;
 
-    let p_space = width - pkg.len();
+    let p_space = width - display_name.len();
     let p_l = p_space / 2;
     let p_r = p_space - p_l;
 
@@ -129,7 +138,7 @@ fn print_block_entry(
         "{}{}{}{}",
         "│".cyan(),
         " ".repeat(p_l),
-        pkg.bold().bright_white(),
+        display_name.bold().bright_white(),
         format!("{}{}", " ".repeat(p_r), "│").cyan()
     )?;
 
@@ -162,6 +171,28 @@ fn print_block_entry(
     Ok(())
 }
 
+fn get_app_label(path: &str) -> Option<String> {
+    let output = Command::new("aapt")
+        .arg("dump")
+        .arg("badging")
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if let Some(label) = trimmed.strip_prefix("application-label:'") {
+                if let Some(end) = label.find('\'') {
+                    return Some(label[..end].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn get_status_color(status: &str) -> Color {
     match status {
         "speed-profile" => Color::Green,
@@ -184,23 +215,34 @@ fn colorize_line(line: &str, status: &str) -> String {
     }
 }
 
-fn get_packages(app_type: AppType) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+#[derive(Debug, Clone)]
+struct Package {
+    name: String,
+    path: String,
+}
+
+fn get_packages(app_type: AppType) -> Result<Vec<Package>, Box<dyn std::error::Error>> {
     let output = Command::new("sh")
         .arg("-c")
         .arg(match app_type {
-            AppType::User => "pm list packages -3",
-            AppType::System => "pm list packages -s",
-            AppType::All => "pm list packages",
+            AppType::User => "pm list packages -f -3",
+            AppType::System => "pm list packages -f -s",
+            AppType::All => "pm list packages -f",
         })
         .output()?;
     let raw = String::from_utf8(output.stdout)?;
     let mut list = Vec::new();
     for line in raw.lines() {
         if let Some(p) = line.trim().strip_prefix("package:") {
-            list.push(p.trim().to_string());
+            if let Some((path, name)) = p.rsplit_once('=') {
+                list.push(Package {
+                    name: name.trim().to_string(),
+                    path: path.trim().to_string(),
+                });
+            }
         }
     }
-    list.sort();
+    list.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(list)
 }
 
