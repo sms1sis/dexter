@@ -5,25 +5,35 @@ An advanced, high-performance Android DexOpt status analyzer written in Rust. Th
 ## Features
 
 - **Blazing Fast**: Captures global state in a single pass instead of per-package lookups.
-- **Colorful CLI**: Visual status indicators (Green for speed, Yellow for verify, Red for APK execution).
-- **Scope Selection**: Analyze User apps, System apps, or both.
-- **Summary Report**: Get a professional breakdown of your device's optimization state.
-- **Filtering**: Easily search for specific packages.
+- **Robust Label Resolution**: Uses a hybrid approach (Native Parsing + `aapt` fallback) to correctly identify app names, even for split APKs.
+- **Visuals**: Unicode-aware, perfectly aligned boxes that respect your terminal width.
+- **Advanced Filtering**: Filter by package name or **DexOpt Status** (e.g., find all `error` or `run-from-apk` apps).
+- **JSON Output**: Export structured data for automation and scripts.
+- **Root Check**: Built-in validation to ensure proper privileges.
 
 ## Requirements
 
 - **Termux** or a Linux environment on Android.
-- **Root access** (`su` or `tsu`) is required to run `dumpsys package dexopt`.
-- **aapt** (Android Asset Packaging Tool) is recommended for fetching application labels in verbose mode.
+- **Root access** (`su` or `tsu`) is required.
+- **aapt** (Android Asset Packaging Tool) is recommended for best results (fetching labels for system apps), but the tool works without it.
 - **Rust/Cargo** (for building from source).
 
 ## Installation
 
-```bash
-git clone https://github.com/your-repo/dexopt_analyzer.git
-cd dexopt_analyzer
-cargo build --release
-```
+1. **Install Dependencies** (Termux):
+   ```bash
+   pkg install rust openssl
+   # Optional but recommended:
+   pkg install aapt
+   ```
+
+2. **Build from Source**:
+   ```bash
+   git clone https://github.com/your-repo/dexopt_analyzer.git
+   cd dexopt_analyzer
+   # We use system OpenSSL to avoid complex cross-compilation on Android
+   OPENSSL_NO_VENDOR=1 cargo build --release
+   ```
 
 The binary will be available at `target/release/dexopt_analyzer`.
 
@@ -36,10 +46,16 @@ Run the tool with root privileges:
 su -c "./target/release/dexopt_analyzer"
 
 # Analyze System apps
-su -c "./target/release/dexopt_analyzer --type system"
+su -c "./target/release/dexopt_analyzer -t system"
 
-# Analyze all apps with a filter
-su -c "./target/release/dexopt_analyzer --type all --filter google"
+# Show JSON output (useful for scripts)
+su -c "./target/release/dexopt_analyzer -j"
+
+# Filter by Status (e.g., find unoptimized apps)
+su -c "./target/release/dexopt_analyzer -s run-from-apk"
+
+# Filter by Name
+su -c "./target/release/dexopt_analyzer -f google"
 ```
 
 ### Options
@@ -48,9 +64,11 @@ su -c "./target/release/dexopt_analyzer --type all --filter google"
 Usage: dexopt_analyzer [OPTIONS]
 
 Options:
-  -f, --filter <FILTER>  Filter output by a specific package name (partial match)
+  -f, --filter <FILTER>  Filter packages by name (substring match)
+  -s, --status <STATUS>  Filter by specific dexopt status (e.g., 'speed', 'verify', 'error')
   -t, --type <TYPE>      Select which type of packages to analyze [default: user] [possible values: user, system, all]
-  -v, --verbose          Verbose output (print raw lines found)
+  -v, --verbose          Show detailed information for each package
+  -j, --json             Output results as JSON
   -h, --help             Print help
   -V, --version          Print version
 ```
