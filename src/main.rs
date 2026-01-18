@@ -212,10 +212,31 @@ fn print_block_entry(
     Ok(())
 }
 
-fn get_app_label(path: &str, _pkg_name: &str) -> Option<String> {
+fn get_app_label(path: &str, pkg_name: &str) -> Option<String> {
     match Apk::new(path) {
         Ok(apk) => {
-             apk.get_application_label()
+             match apk.get_application_label() {
+                Some(label) => {
+                    // Check if label is a resource ID reference (e.g., @ref/0x...)
+                    // or a raw resource path (org.chromium...) which sometimes happens with split APKs or resource obfuscation.
+                    // For now, if it looks like a full package name (contains dots) and equals the pkg_name, 
+                    // or if it looks like a file path, we might prefer a cleaner fallback if possible,
+                    // but usually the label is just the app name.
+                    
+                    // Chrome example: "org.chromium.chrome.browser.site_settings.ManageSpaceActivity"
+                    // This looks like a class name or internal ID being returned as the label.
+                    
+                    // Cleanup: remove potential newlines/tabs
+                    let clean_label = label.trim().replace(['\r', '\n'], " ");
+                    
+                    if clean_label.is_empty() {
+                        return None;
+                    }
+                    
+                    Some(clean_label)
+                },
+                None => None,
+             }
         }
         Err(_) => None,
     }
