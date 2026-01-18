@@ -212,25 +212,26 @@ fn print_block_entry(
     Ok(())
 }
 
-fn get_app_label(path: &str, _pkg_name: &str) -> Option<String> {
+fn get_app_label(path: &str, pkg_name: &str) -> Option<String> {
     match Apk::new(path) {
         Ok(apk) => {
              match apk.get_application_label() {
                 Some(label) => {
-                    // Check if label is a resource ID reference (e.g., @ref/0x...)
-                    // or a raw resource path (org.chromium...) which sometimes happens with split APKs or resource obfuscation.
-                    // For now, if it looks like a full package name (contains dots) and equals the pkg_name, 
-                    // or if it looks like a file path, we might prefer a cleaner fallback if possible,
-                    // but usually the label is just the app name.
-                    
-                    // Chrome example: "org.chromium.chrome.browser.site_settings.ManageSpaceActivity"
-                    // This looks like a class name or internal ID being returned as the label.
-                    
                     // Cleanup: remove potential newlines/tabs
                     let clean_label = label.trim().replace(['\r', '\n'], " ");
                     
                     if clean_label.is_empty() {
                         return None;
+                    }
+
+                    // Heuristic: Filter out labels that look like Java class names (e.g. Chrome's ManageSpaceActivity)
+                    // If it has dots, no spaces, and looks like a package path, it's likely a parser error picking up the wrong attribute.
+                    // We allow it only if it exactly matches the package name (some apps might actually do this).
+                    if clean_label.contains('.') && !clean_label.contains(' ') && clean_label != pkg_name {
+                        // Check if it really looks like a class path (alphanumeric + dots)
+                        if clean_label.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '_') {
+                             return None; 
+                        }
                     }
                     
                     Some(clean_label)
