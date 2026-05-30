@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use serde::Serialize;
 use serde_json::json;
 use once_cell::sync::Lazy;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthStr, UnicodeWidthChar};
 use terminal_size::{Width, terminal_size};
 
 /// A tool to analyze dexopt status on Android devices.
@@ -41,6 +41,11 @@ struct Args {
     /// Optimize application(s). Use 'all' for background dexopt job, or specify a package name.
     #[arg(short = 'o', long = "optimize")]
     optimize: Option<String>,
+
+    /// Optimize all user apps that have no split part with 'speed' or 'speed-profile' status.
+    /// Runs `dexter -o <package>` for each qualifying app.
+    #[arg(short = 'm', long = "optimize-missing")]
+    optimize_missing: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -198,7 +203,6 @@ struct Analyzer {
     results: HashMap<String, Vec<DexOptInfo>>,
 }
 
-static STATUS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(arm64:|arm:)").expect("Invalid regex for status"));
 static FILTER_EXTRACT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(?:status|filter)=([^\]\s]+)").expect("Invalid regex for filter extraction"));
 
 impl Analyzer {
@@ -227,10 +231,8 @@ impl Analyzer {
             {
                 current_pkg = Some(trimmed[1..trimmed.len() - 1].to_string());
             } else if let Some(ref pkg) = current_pkg {
-                if STATUS_RE.is_match(trimmed) {
-                    let status = FILTER_EXTRACT_RE
-                        .captures(trimmed)
-                        .and_then(|c| c.get(1))
+                if let Some(cap) = FILTER_EXTRACT_RE.captures(trimmed) {
+                    let status = cap.get(1)
                         .map(|m| m.as_str().to_string())
                         .unwrap_or_else(|| "unknown".to_string());
 
@@ -247,6 +249,14 @@ impl Analyzer {
 
     fn get_info(&self, pkg_name: &str) -> Option<&Vec<DexOptInfo>> {
         self.results.get(pkg_name)
+    }
+
+    /// Returns true if any split part of this package already has 'speed' or 'speed-profile'.
+    fn has_speed_status(&self, pkg_name: &str) -> bool {
+        self.results
+            .get(pkg_name)
+            .map(|infos| infos.iter().any(|i| i.status == "speed" || i.status == "speed-profile"))
+            .unwrap_or(false)
     }
 }
 
@@ -286,14 +296,9 @@ impl UI {
         pkg: &Package,
         app_label: Option<&str>,
         info_list: Option<&Vec<DexOptInfo>>,
+        max_term_width: usize,
     ) -> io::Result<()> {
         let min_width: usize = 40;
-
-        let max_term_width = if let Some((Width(w), _)) = terminal_size() {
-            (w as usize).saturating_sub(4)
-        } else {
-            120
-        };
 
         // Build plain (no ANSI) display name for accurate width measurement
         let full_display_name = match app_label {
@@ -306,7 +311,7 @@ impl UI {
             let mut truncated = String::new();
             let mut w = 0usize;
             for c in full_display_name.chars() {
-                let cw = UnicodeWidthStr::width(c.to_string().as_str());
+                let cw = c.width().unwrap_or(0);
                 if w + cw > max_term_width.saturating_sub(3) {
                     truncated.push_str("...");
                     break;
@@ -535,6 +540,97 @@ fn main() -> Result<()> {
     let dump = Analyzer::fetch_dump()?;
     let analyzer = Analyzer::new(&dump);
 
+    // --optimize-missing: compile every user app that has no split part with
+    // speed or speed-profile, then show the same verbose block entries as -o.
+    if args.optimize_missing {
+        // Always work on user apps for this flag, regardless of --type.
+        let user_packages = if matches!(args.r#type, AppType::User) {
+            packages.clone()
+        } else {
+            Package::fetch_list(AppType::User)?
+        };
+
+        let candidate_names: Vec<String> = user_packages
+            .iter()
+            .filter(|pkg| !analyzer.has_speed_status(&pkg.name))
+            .map(|pkg| pkg.name.clone())
+            .collect();
+
+        if candidate_names.is_empty() {
+            println!("{} {}", prefix, "All user apps already have speed/speed-profile — nothing to do.".green().bold());
+            return Ok(());
+        }
+
+        println!(
+            "{} Found {} user app(s) without speed/speed-profile. Optimizing...",
+            prefix,
+            candidate_names.len().to_string().yellow().bold()
+        );
+
+        for name in &candidate_names {
+            println!("{} Optimizing: {}", prefix, name.bright_white().bold());
+
+            let cmd_clear = format!("pm art clear-app-profiles {}", name);
+            let s1 = Command::new("su")
+                .arg("-c")
+                .arg(&cmd_clear)
+                .status()
+                .with_context(|| format!("Failed to clear profiles for {}", name))?;
+            if !s1.success() {
+                eprintln!("{} Failed to clear app profiles for {}", prefix, name);
+            }
+
+            let cmd_compile = format!("cmd package compile -m speed -f {}", name);
+            let s2 = Command::new("su")
+                .arg("-c")
+                .arg(&cmd_compile)
+                .status()
+                .with_context(|| format!("Failed to compile {}", name))?;
+            if !s2.success() {
+                eprintln!("{} Failed to compile {}", prefix, name);
+            }
+        }
+
+        // Re-fetch the dump so the display reflects the freshly compiled statuses.
+        println!("{} {}", prefix, "Fetching updated dexopt dump...".bold());
+        let updated_dump = Analyzer::fetch_dump()?;
+        let updated_analyzer = Analyzer::new(&updated_dump);
+
+        let max_term_width = if let Some((Width(w), _)) = terminal_size() {
+            (w as usize).saturating_sub(4)
+        } else {
+            120
+        };
+        let mut stdout = io::stdout();
+
+        let display_pkgs: Vec<&Package> = user_packages
+            .iter()
+            .filter(|pkg| candidate_names.iter().any(|n| n == &pkg.name))
+            .collect();
+
+        let display_data: Vec<(&Package, Option<String>, Option<&Vec<DexOptInfo>>)> =
+            display_pkgs
+                .par_iter()
+                .map(|pkg| (*pkg, pkg.get_label(), updated_analyzer.get_info(&pkg.name)))
+                .collect();
+
+        for (pkg, app_label, info_list) in display_data {
+            UI::print_block_entry(&mut stdout, pkg, app_label.as_deref(), info_list, max_term_width)?;
+        }
+
+        let mut stats: BTreeMap<String, usize> = BTreeMap::new();
+        for name in &candidate_names {
+            if let Some(infos) = updated_analyzer.get_info(name) {
+                for info in infos {
+                    *stats.entry(info.status.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        UI::print_summary(candidate_names.len(), &stats, AppType::User);
+
+        return Ok(());
+    }
+
     if !args.json && !args.verbose {
         UI::print_header();
     }
@@ -543,6 +639,11 @@ fn main() -> Result<()> {
     let mut stats: BTreeMap<String, usize> = BTreeMap::new();
     let mut total_displayed = 0;
     let mut json_results = Vec::new();
+    let max_term_width = if let Some((Width(w), _)) = terminal_size() {
+        (w as usize).saturating_sub(4)
+    } else {
+        120
+    };
 
     // Step 1: name filter (cheap string match)
     let name_filtered: Vec<&Package> = packages
@@ -598,7 +699,7 @@ fn main() -> Result<()> {
                 "dexopt_info": info_list
             }));
         } else if args.verbose {
-            UI::print_block_entry(&mut stdout, pkg, app_label.as_deref(), info_list)?;
+            UI::print_block_entry(&mut stdout, pkg, app_label.as_deref(), info_list, max_term_width)?;
         } else if let Some(infos) = info_list {
             for (i, info) in infos.iter().enumerate() {
                 let colored_raw = UI::colorize_line(&info.raw_line, &info.status);
@@ -683,6 +784,36 @@ mod tests {
                 "Failed for label: {:?}", label
             );
         }
+    }
+
+    #[test]
+    fn test_has_speed_status() {
+        let dump = r#"
+[com.example.optimized]
+  arm64: [status=speed-profile] [reason=bg-dexopt] [primary-abi]
+[com.example.partially.optimized]
+  arm64: [status=verify] [reason=prebuilt]
+  arm64: [status=speed] [reason=cmdline]
+[com.example.unoptimized]
+  arm64: [status=verify] [reason=prebuilt]
+[com.example.no.info]
+"#;
+        let analyzer = Analyzer::new(dump);
+
+        // Single part with speed-profile → true
+        assert!(analyzer.has_speed_status("com.example.optimized"));
+
+        // Multiple parts, one has speed → true (split-part rule: if any has speed, skip)
+        assert!(analyzer.has_speed_status("com.example.partially.optimized"));
+
+        // Single part with verify only → false
+        assert!(!analyzer.has_speed_status("com.example.unoptimized"));
+
+        // No dexopt info at all → false
+        assert!(!analyzer.has_speed_status("com.example.no.info"));
+
+        // Non-existent package → false
+        assert!(!analyzer.has_speed_status("com.does.not.exist"));
     }
 
     #[test]
