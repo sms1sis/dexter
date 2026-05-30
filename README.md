@@ -8,7 +8,7 @@ An advanced, high-performance Android DexOpt status analyzer written in Rust. Th
 - **Robust Label Resolution**: Uses a hybrid approach (Native Parsing + `aapt` fallback) to correctly identify app names, even for split APKs.
 - **Visuals**: Unicode-aware, perfectly aligned boxes that respect your terminal width.
 - **Advanced Filtering**: Filter by package name or **DexOpt Status** (e.g., find all `error` or `run-from-apk` apps).
-- **App Optimization**: Force optimize specific apps or trigger a system-wide background dexopt job.
+- **App Optimization**: Force optimize specific apps, batch-optimize all unoptimized user apps, or trigger a system-wide background dexopt job.
 - **JSON Output**: Export structured data for automation and scripts.
 - **Root Check**: Built-in validation to ensure proper privileges.
 
@@ -30,7 +30,7 @@ An advanced, high-performance Android DexOpt status analyzer written in Rust. Th
 
 2. **Build from Source**:
    ```bash
-   git clone https://github.com/your-repo/dexter.git
+   git clone https://github.com/sms1sis/dexter.git
    cd dexter
    # We use system OpenSSL to avoid complex cross-compilation on Android
    OPENSSL_NO_VENDOR=1 cargo build --release
@@ -43,26 +43,32 @@ The binary will be available at `target/release/dexter`.
 Run the tool with root privileges:
 
 ```bash
-# Analyze User apps (default)
-su -c "./target/release/dexter"
+# Analyze user apps (default)
+sudo ./target/release/dexter
 
-# Analyze System apps
-su -c "./target/release/dexter -t system"
+# Analyze system apps
+sudo ./target/release/dexter -t system
 
-# Show JSON output (useful for scripts)
-su -c "./target/release/dexter -j"
+# Show verbose details for each package
+sudo ./target/release/dexter -v
 
-# Filter by Status (e.g., find unoptimized apps)
-su -c "./target/release/dexter -s run-from-apk"
+# Filter by name
+sudo ./target/release/dexter -f google
 
-# Filter by Name
-su -c "./target/release/dexter -f google"
+# Filter by dexopt status
+sudo ./target/release/dexter -s run-from-apk
+
+# Output as JSON (useful for scripts)
+sudo ./target/release/dexter -j
 
 # Optimize a specific package (clears profiles then compiles to 'speed')
-su -c "./target/release/dexter -o com.example.app"
+sudo ./target/release/dexter -o com.example.app
 
-# Trigger system background dexopt job (bg-dexopt-job)
-su -c "./target/release/dexter -o all"
+# Trigger system background dexopt job
+sudo ./target/release/dexter -o all
+
+# Batch-optimize all user apps that lack speed/speed-profile
+sudo ./target/release/dexter -m
 ```
 
 ### Options
@@ -77,9 +83,21 @@ Options:
   -v, --verbose            Show detailed information for each package
   -j, --json               Output results as JSON
   -o, --optimize <TARGET>  Optimize application(s). Use 'all' for background dexopt job, or specify a package name
+  -m, --optimize-missing   Optimize all user apps that have no split part with 'speed' or 'speed-profile' status
   -h, --help               Print help
   -V, --version            Print version
 ```
+
+### DexOpt Status Reference
+
+| Status | Meaning |
+|---|---|
+| `speed` | Fully compiled to native code — best runtime performance |
+| `speed-profile` | Compiled based on a profile — good balance of performance and install size |
+| `verify` | Bytecode verified only — slower at runtime |
+| `quicken` | Lightly optimized bytecode — faster than verify, slower than speed |
+| `run-from-apk` | Not compiled at all — runs directly from the APK |
+| `error` | Compilation failed |
 
 ## License
 

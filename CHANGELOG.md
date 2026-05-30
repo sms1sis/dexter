@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.2] - 2026-05-30
+
+### ✨ Features
+* **Optimize Missing Flag:** Added `-m` / `--optimize-missing` flag to batch-compile all user apps that lack `speed` or `speed-profile` dexopt status.
+    * Automatically skips any package where at least one split part already has `speed` or `speed-profile`.
+    * Re-fetches the dexopt dump after compilation and displays verbose block entries with updated statuses.
+    * Shows the full summary box on completion.
+
+### 🚀 Performance
+* **Single Regex Pass:** Removed redundant `STATUS_RE` gate; `FILTER_EXTRACT_RE` now serves as both the line filter and status extractor in one pass.
+* **Cached Terminal Width:** `terminal_size()` is now resolved once before the display loop instead of on every package in verbose mode.
+* **Zero-Alloc Char Width:** Replaced per-character `String` allocation in the Unicode truncation path with `UnicodeWidthChar`, eliminating heap allocations in the hot loop.
+
+---
+
 ## [0.3.1] - 2026-01-29
 
 ### 🛠 Improvements
