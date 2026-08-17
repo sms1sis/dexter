@@ -23,8 +23,6 @@ terminal_size = "0.4.3"
 thiserror = "2.0.17"
 unicode-width = "0.2.2"
 
-# once_cell was dropped: src/main.rs now uses std::sync::LazyLock (stable since
-# Rust 1.80), which the project's MSRV (edition 2024) already supports.
 
 [profile.release]
 lto = true

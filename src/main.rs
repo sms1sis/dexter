@@ -110,28 +110,34 @@ impl Package {
 
     /// Gets the application label from the APK file.
     ///
-    /// NOTE: previously this tried `aapt` first on every package, which meant a
-    /// subprocess spawn attempt per package even when `aapt` wasn't installed at
-    /// all. Order is now flipped to match the documented/changelogged behavior:
-    /// native parsing (no subprocess) is tried first, and `aapt` is only ever
-    /// invoked as a fallback, gated by `AAPT_AVAILABLE` (checked once, cached)
-    /// so it's skipped entirely when `aapt` isn't present.
+    /// NOTE: an earlier revision of this function tried native `apk-info`
+    /// parsing first on the theory that it avoids a subprocess spawn. In
+    /// practice this was a regression: the current `apk-info-zip` release
+    /// does full signature/certificate parsing per APK (pulls in `cms`,
+    /// `sha1`, `sha2`, `md-5`), which is far more expensive than a single
+    /// `aapt dump badging` subprocess call. Benchmarking confirmed `aapt`
+    /// first is significantly faster when `aapt` is installed, so that's
+    /// the primary path again. `AAPT_AVAILABLE` is still checked once and
+    /// cached, so this doesn't reintroduce the pre-0.2.0 problem of a wasted
+    /// spawn attempt per package when `aapt` is genuinely absent.
     fn get_label(&self) -> Option<String> {
-        // 1. apk-info native parsing: fast, self-contained, no subprocess spawn
+        // 1. aapt: resolves string resources directly from the APK — fastest
+        // in practice, only attempted when known to be installed.
+        if *AAPT_AVAILABLE {
+            if let Some(label) = self.get_label_from_aapt() {
+                return Some(label);
+            }
+        }
+
+        // 2. apk-info native parsing: fallback when aapt is unavailable, or
+        // failed to resolve a label for this particular package (e.g. some
+        // split APKs).
         if let Ok(apk) = Apk::new(&self.path) {
             if let Some(label) = apk.get_application_label() {
                 let clean = label.trim().replace(['\r', '\n'], " ");
                 if !clean.is_empty() && Self::is_valid_label(&clean) {
                     return Some(clean);
                 }
-            }
-        }
-
-        // 2. aapt fallback: resolves string resources directly from the APK,
-        // used only when aapt is actually installed.
-        if *AAPT_AVAILABLE {
-            if let Some(label) = self.get_label_from_aapt() {
-                return Some(label);
             }
         }
 
@@ -194,9 +200,14 @@ impl Package {
         None
     }
 
+    /// Probes `aapt` directly (rather than via `which`) so detection uses
+    /// exactly the same PATH resolution `Command::new("aapt")` will use when
+    /// actually invoked. Under a root/`su` shell on Android, PATH can differ
+    /// from a normal login shell (and `which` may not even be present there),
+    /// so relying on `which` risked silently disabling the fast aapt path.
     fn is_aapt_available() -> bool {
-        Command::new("which")
-            .arg("aapt")
+        Command::new("aapt")
+            .arg("version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
