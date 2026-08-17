@@ -15,7 +15,6 @@ apk-info = "1.0.9"
 clap = { version = "4.5.54", features = ["derive"] }
 colored = "3.0.0"
 nix = { version = "0.31.3", features = ["user"] }
-once_cell = "1.21.3"
 rayon = "1.11.0"
 regex = "1.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -23,3 +22,11 @@ serde_json = "1.0.149"
 terminal_size = "0.4.3"
 thiserror = "2.0.17"
 unicode-width = "0.2.2"
+
+# once_cell was dropped: src/main.rs now uses std::sync::LazyLock (stable since
+# Rust 1.80), which the project's MSRV (edition 2024) already supports.
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use serde::Serialize;
 use serde_json::json;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use unicode_width::{UnicodeWidthStr, UnicodeWidthChar};
 use terminal_size::{Width, terminal_size};
 
@@ -109,19 +109,29 @@ impl Package {
     }
 
     /// Gets the application label from the APK file.
+    ///
+    /// NOTE: previously this tried `aapt` first on every package, which meant a
+    /// subprocess spawn attempt per package even when `aapt` wasn't installed at
+    /// all. Order is now flipped to match the documented/changelogged behavior:
+    /// native parsing (no subprocess) is tried first, and `aapt` is only ever
+    /// invoked as a fallback, gated by `AAPT_AVAILABLE` (checked once, cached)
+    /// so it's skipped entirely when `aapt` isn't present.
     fn get_label(&self) -> Option<String> {
-        // 1. aapt: resolves string resources directly from the APK — most accurate
-        if let Some(label) = self.get_label_from_aapt() {
-            return Some(label);
-        }
-
-        // 2. apk-info native parsing: fast fallback when aapt is unavailable
+        // 1. apk-info native parsing: fast, self-contained, no subprocess spawn
         if let Ok(apk) = Apk::new(&self.path) {
             if let Some(label) = apk.get_application_label() {
                 let clean = label.trim().replace(['\r', '\n'], " ");
                 if !clean.is_empty() && Self::is_valid_label(&clean) {
                     return Some(clean);
                 }
+            }
+        }
+
+        // 2. aapt fallback: resolves string resources directly from the APK,
+        // used only when aapt is actually installed.
+        if *AAPT_AVAILABLE {
+            if let Some(label) = self.get_label_from_aapt() {
+                return Some(label);
             }
         }
 
@@ -151,8 +161,10 @@ impl Package {
         if is_class_like {
             return false;
         }
-        // Suspiciously long strings are almost certainly not a real label
-        if label.len() > 64 {
+        // Suspiciously long strings are almost certainly not a real label.
+        // Counts chars, not bytes, so multi-byte labels (CJK, emoji, accents)
+        // aren't unfairly penalized for their UTF-8 encoded size.
+        if label.chars().count() > 64 {
             return false;
         }
         true
@@ -193,6 +205,10 @@ impl Package {
     }
 }
 
+/// Whether `aapt` is installed, resolved once and cached — avoids spawning
+/// `which aapt` (or attempting `aapt` itself) on every package lookup.
+static AAPT_AVAILABLE: LazyLock<bool> = LazyLock::new(Package::is_aapt_available);
+
 #[derive(Debug, Clone, Serialize)]
 struct DexOptInfo {
     raw_line: String,
@@ -203,7 +219,12 @@ struct Analyzer {
     results: HashMap<String, Vec<DexOptInfo>>,
 }
 
-static FILTER_EXTRACT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(?:status|filter)=([^\]\s]+)").expect("Invalid regex for filter extraction"));
+// NOTE: previously matched `status=` OR `filter=`, but `dumpsys package dexopt`
+// output never contains a `filter=` field — that alternation was vestigial
+// dead weight. Renamed to reflect what it actually extracts.
+static STATUS_EXTRACT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bstatus=([^\]\s]+)").expect("Invalid regex for status extraction")
+});
 
 impl Analyzer {
     fn fetch_dump() -> Result<String> {
@@ -231,7 +252,7 @@ impl Analyzer {
             {
                 current_pkg = Some(trimmed[1..trimmed.len() - 1].to_string());
             } else if let Some(ref pkg) = current_pkg {
-                if let Some(cap) = FILTER_EXTRACT_RE.captures(trimmed) {
+                if let Some(cap) = STATUS_EXTRACT_RE.captures(trimmed) {
                     let status = cap.get(1)
                         .map(|m| m.as_str().to_string())
                         .unwrap_or_else(|| "unknown".to_string());
@@ -469,15 +490,66 @@ impl UI {
 
 fn check_root() -> Result<()> {
     if !nix::unistd::Uid::current().is_root() {
-        eprintln!("{}", "Error: This tool requires root access (su).".red().bold());
-        std::process::exit(1);
+        anyhow::bail!("{}", "This tool requires root access (su).".red().bold());
     }
     Ok(())
 }
 
+/// Whitelist check applied before any user-supplied string is interpolated into
+/// a command string executed via `su -c "<string>"`. Android package/component
+/// names are restricted to ASCII alphanumerics, '.', '_', and '-', so anything
+/// outside that set is rejected rather than risking shell metacharacters
+/// (`;`, `` ` ``, `$()`, etc.) being interpreted by the shell `su -c` invokes.
+fn is_shell_safe_target(target: &str) -> bool {
+    !target.is_empty()
+        && target
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
+/// Clears app profiles then force-compiles a single package to 'speed'.
+/// Extracted from what was previously duplicated logic in both the `-o`
+/// optimize path and the `-m` optimize-missing loop.
+fn optimize_package(target: &str) -> Result<()> {
+    if !is_shell_safe_target(target) {
+        anyhow::bail!(
+            "Refusing to optimize '{}': contains characters not valid in a package name",
+            target
+        );
+    }
+
+    let prefix = "[-]".cyan();
+
+    let cmd_clear = format!("pm art clear-app-profiles {}", target);
+    let status1 = Command::new("su")
+        .arg("-c")
+        .arg(&cmd_clear)
+        .status()
+        .with_context(|| format!("Failed to clear app profiles for {}", target))?;
+    if !status1.success() {
+        eprintln!("{} Failed to clear app profiles for {}", prefix, target);
+    }
+
+    let cmd_compile = format!("cmd package compile -m speed -f {}", target);
+    let status2 = Command::new("su")
+        .arg("-c")
+        .arg(&cmd_compile)
+        .status()
+        .with_context(|| format!("Failed to compile {}", target))?;
+    if !status2.success() {
+        eprintln!("{} Failed to compile {}", prefix, target);
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
-    check_root()?;
+    // Parsed *before* the root check: clap intercepts and exits on its own for
+    // --help/--version/invalid-args during parse(), so those must not require
+    // root. Previously check_root() ran first, meaning `dexter --help` failed
+    // with a root error instead of printing help.
     let mut args = Args::parse();
+    check_root()?;
 
     if let Some(ref target) = args.optimize {
         args.verbose = true;
@@ -506,25 +578,7 @@ fn main() -> Result<()> {
                 eprintln!("{} Optimization command failed.", prefix);
             }
         } else {
-            let cmd1 = format!("pm art clear-app-profiles {}", target);
-            let status1 = Command::new("su")
-                .arg("-c")
-                .arg(&cmd1)
-                .status()
-                .with_context(|| "Failed to clear app profiles")?;
-            if !status1.success() {
-                eprintln!("{} Failed to clear app profiles for {}", prefix, target);
-            }
-
-            let cmd2 = format!("cmd package compile -m speed -f {}", target);
-            let status2 = Command::new("su")
-                .arg("-c")
-                .arg(&cmd2)
-                .status()
-                .with_context(|| "Failed to compile package")?;
-            if !status2.success() {
-                eprintln!("{} Failed to compile {}", prefix, target);
-            }
+            optimize_package(target)?;
         }
     }
 
@@ -569,26 +623,7 @@ fn main() -> Result<()> {
 
         for name in &candidate_names {
             println!("{} Optimizing: {}", prefix, name.bright_white().bold());
-
-            let cmd_clear = format!("pm art clear-app-profiles {}", name);
-            let s1 = Command::new("su")
-                .arg("-c")
-                .arg(&cmd_clear)
-                .status()
-                .with_context(|| format!("Failed to clear profiles for {}", name))?;
-            if !s1.success() {
-                eprintln!("{} Failed to clear app profiles for {}", prefix, name);
-            }
-
-            let cmd_compile = format!("cmd package compile -m speed -f {}", name);
-            let s2 = Command::new("su")
-                .arg("-c")
-                .arg(&cmd_compile)
-                .status()
-                .with_context(|| format!("Failed to compile {}", name))?;
-            if !s2.success() {
-                eprintln!("{} Failed to compile {}", prefix, name);
-            }
+            optimize_package(name)?;
         }
 
         // Re-fetch the dump so the display reflects the freshly compiled statuses.
@@ -648,7 +683,7 @@ fn main() -> Result<()> {
     // Step 1: name filter (cheap string match)
     let name_filtered: Vec<&Package> = packages
         .iter()
-        .filter(|pkg| args.filter.as_ref().map_or(true, |f| pkg.name.contains(f)))
+        .filter(|pkg| args.filter.as_ref().is_none_or(|f| pkg.name.contains(f)))
         .collect();
 
     // Step 2: status filter (cheap lookup, no label fetching)
