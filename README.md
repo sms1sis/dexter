@@ -5,7 +5,7 @@ An advanced, high-performance Android DexOpt status analyzer written in Rust. Th
 ## Features
 
 - **Blazing Fast**: Captures global state in a single pass instead of per-package lookups.
-- **Robust Label Resolution**: Uses a hybrid approach (Native Parsing + `aapt` fallback) to correctly identify app names, even for split APKs.
+- **Robust Label Resolution**: Uses a hybrid approach ( aapt + 'Native Parsing` fallback) to correctly identify app names, even for split APKs.
 - **Visuals**: Unicode-aware, perfectly aligned boxes that respect your terminal width.
 - **Advanced Filtering**: Filter by package name or **DexOpt Status** (e.g., find all `error` or `run-from-apk` apps).
 - **App Optimization**: Force optimize specific apps, batch-optimize all unoptimized user apps, or trigger a system-wide background dexopt job.
