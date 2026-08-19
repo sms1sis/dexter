@@ -6,7 +6,7 @@ authors = ["sms1sis <sadimsajid2004@gmail.com>"]
 license = "GPL-3.0-or-later"
 description = "A command-line tool to analyze dexopt state and artifacts on Android"
 repository = "https://github.com/sms1sis/dexter"
-categories = ["command-line-utilities", "os::android"]
+categories = ["command-line-utilities", "os"]
 keywords = ["android", "dexopt", "dex", "art", "dalvik"]
 
 [dependencies]
